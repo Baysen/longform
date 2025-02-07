@@ -47,6 +47,8 @@ export class StoreVaultSync {
   private app: App;
   private vault: Vault;
   private metadataCache: MetadataCache;
+  private isInitializing = true;
+  private settlingTime = 5000; // fallback settling time
 
   private lastKnownDraftsByPath: Record<string, Draft> = {};
   private unsubscribeDraftsStore: Unsubscriber;
@@ -61,6 +63,86 @@ export class StoreVaultSync {
 
   destroy(): void {
     this.unsubscribeDraftsStore();
+  }
+
+  private isSyncEnabled(): boolean {
+    try {
+      // @ts-ignore - accessing private API
+      const syncPlugin = this.app.internalPlugins?.plugins?.sync;
+      return syncPlugin?.enabled === true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async waitForSync(): Promise<void> {
+    // First check if sync is even enabled
+    if (!this.isSyncEnabled()) {
+      console.log("[Longform] Obsidian Sync not enabled, proceeding with initialization");
+      return Promise.resolve();
+    }
+
+    try {
+      // @ts-ignore - accessing private API
+      const sync = this.app.internalPlugins.plugins.sync.instance;
+
+      // Check if we can access the sync status
+      if (!sync?.syncStatus || typeof sync.on !== 'function') {
+        console.log("[Longform] Sync API changed, using fallback wait time");
+        return this.fallbackWait();
+      }
+
+      return new Promise((resolve) => {
+        if (!sync.syncStatus.isSyncing) {
+          console.log("[Longform] Sync enabled but not active, proceeding with initialization");
+          resolve();
+          return;
+        }
+
+        console.log("[Longform] Waiting for active sync to complete...");
+        const handler = () => {
+          if (!sync.syncStatus?.isSyncing) {
+            sync.off('sync-status', handler);
+            console.log("[Longform] Sync complete, proceeding with initialization");
+            // Add a small settling time after sync completes
+            setTimeout(resolve, 2000);
+          }
+        };
+
+        sync.on('sync-status', handler);
+
+        // Add a timeout just in case sync status never changes
+        setTimeout(() => {
+          sync.off('sync-status', handler);
+          console.log("[Longform] Sync wait timed out, proceeding with initialization");
+          resolve();
+        }, this.settlingTime);
+      });
+    } catch (error) {
+      console.log("[Longform] Error accessing sync status, using fallback wait time");
+      return this.fallbackWait();
+    }
+  }
+
+  private async fallbackWait(): Promise<void> {
+    console.log(`[Longform] Using fallback wait time of ${this.settlingTime}ms`);
+    return new Promise(resolve => setTimeout(resolve, this.settlingTime));
+  }
+
+  async initialize() {
+    try {
+      await this.waitForSync();
+      await this.discoverDrafts();
+
+      // Add a settling period after initial discovery
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      this.isInitializing = false;
+      console.log("[Longform] Initialization complete");
+    } catch (error) {
+      console.error('[Longform] Error during initialization:', error);
+      this.isInitializing = false;
+    }
   }
 
   async discoverDrafts() {
@@ -94,9 +176,8 @@ export class StoreVaultSync {
     );
     draftsStore.set(draftsToWrite);
 
-    const message = `[Longform] Loaded and watching projects. Found ${
-      draftFiles.length
-    } drafts in ${(new Date().getTime() - start) / 1000.0}s.`;
+    const message = `[Longform] Loaded and watching projects. Found ${draftFiles.length
+      } drafts in ${(new Date().getTime() - start) / 1000.0}s.`;
 
     console.log(message);
 
@@ -106,6 +187,7 @@ export class StoreVaultSync {
   }
 
   async fileMetadataChanged(file: TFile, _data: string, cache: CachedMetadata) {
+    if (this.isInitializing) return;
     if (this.pathsToIgnoreNextChange.delete(file.path)) {
       return;
     }
@@ -143,6 +225,7 @@ export class StoreVaultSync {
   }
 
   async fileCreated(file: TFile) {
+    if (this.isInitializing) return;
     const drafts = get(draftsStore);
 
     // check if a new scene has been moved into this folder
@@ -178,6 +261,7 @@ export class StoreVaultSync {
   }
 
   async fileDeleted(file: TFile) {
+    if (this.isInitializing) return;
     const drafts = get(draftsStore);
     const draftIndex = drafts.findIndex((d) => d.vaultPath === file.path);
     if (draftIndex >= 0) {
@@ -232,6 +316,7 @@ export class StoreVaultSync {
   }
 
   async fileRenamed(file: TFile, oldPath: string) {
+    if (this.isInitializing) return;
     const drafts = get(draftsStore);
     const draftIndex = drafts.findIndex((d) => d.vaultPath === oldPath);
     if (draftIndex >= 0) {
