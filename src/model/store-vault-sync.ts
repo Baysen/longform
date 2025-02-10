@@ -17,6 +17,8 @@ import {
 } from "src/model/draft-utils";
 import { fileNameFromPath } from "./note-utils";
 import { findScene, sceneFolderPath } from "./scene-navigation";
+import { pluginSettings } from "./stores";
+import { waitingForSync } from "./stores";
 
 type FileWithMetadata = {
   file: TFile;
@@ -76,9 +78,10 @@ export class StoreVaultSync {
   }
 
   private async waitForSync(): Promise<void> {
-    // First check if sync is even enabled
-    if (!this.isSyncEnabled()) {
-      console.log("[Longform] Obsidian Sync not enabled, proceeding with initialization");
+    const settings = get(pluginSettings);
+
+    // First check if wait for sync is enabled in settings
+    if (!settings.waitForSync || !this.isSyncEnabled()) {
       return Promise.resolve();
     }
 
@@ -87,25 +90,32 @@ export class StoreVaultSync {
       const sync = this.app.internalPlugins.plugins.sync.instance;
 
       // Check if we can access the sync status
-      if (!sync?.syncStatus || typeof sync.on !== 'function') {
-        console.log("[Longform] Sync API changed, using fallback wait time");
-        return this.fallbackWait();
+      if (!sync?.instance?.syncing) {
+        if (settings.fallbackWaitEnabled) {
+          console.log("[Longform] Waiting fallback time...");
+          return new Promise(resolve =>
+            setTimeout(resolve, settings.fallbackWaitTime * 1000)
+          );
+        }
+        return Promise.resolve();
       }
 
+      waitingForSync.set(true);
       return new Promise((resolve) => {
         if (!sync.syncStatus.isSyncing) {
-          console.log("[Longform] Sync enabled but not active, proceeding with initialization");
+          waitingForSync.set(false);
           resolve();
           return;
         }
 
         console.log("[Longform] Waiting for active sync to complete...");
+
         const handler = () => {
           if (!sync.syncStatus?.isSyncing) {
             sync.off('sync-status', handler);
             console.log("[Longform] Sync complete, proceeding with initialization");
-            // Add a small settling time after sync completes
-            setTimeout(resolve, 2000);
+            waitingForSync.set(false);
+            resolve();
           }
         };
 
@@ -115,18 +125,22 @@ export class StoreVaultSync {
         setTimeout(() => {
           sync.off('sync-status', handler);
           console.log("[Longform] Sync wait timed out, proceeding with initialization");
+          waitingForSync.set(false);
           resolve();
         }, this.settlingTime);
       });
     } catch (error) {
-      console.log("[Longform] Error accessing sync status, using fallback wait time");
+      waitingForSync.set(false);
       return this.fallbackWait();
     }
   }
 
   private async fallbackWait(): Promise<void> {
-    console.log(`[Longform] Using fallback wait time of ${this.settlingTime}ms`);
-    return new Promise(resolve => setTimeout(resolve, this.settlingTime));
+    const settings = get(pluginSettings);
+    if (!settings.fallbackWaitEnabled) {
+      return Promise.resolve();
+    }
+    return new Promise(resolve => setTimeout(resolve, settings.fallbackWaitTime * 1000));
   }
 
   async initialize() {
@@ -134,13 +148,8 @@ export class StoreVaultSync {
       await this.waitForSync();
       await this.discoverDrafts();
 
-      // Add a settling period after initial discovery
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
       this.isInitializing = false;
-      console.log("[Longform] Initialization complete");
     } catch (error) {
-      console.error('[Longform] Error during initialization:', error);
       this.isInitializing = false;
     }
   }
