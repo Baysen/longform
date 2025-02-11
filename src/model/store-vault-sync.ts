@@ -50,7 +50,7 @@ export class StoreVaultSync {
   private vault: Vault;
   private metadataCache: MetadataCache;
   private isInitializing = true;
-  private settlingTime = 5000; // fallback settling time
+  private settlingTime = 30000; // fallback settling time
 
   private lastKnownDraftsByPath: Record<string, Draft> = {};
   private unsubscribeDraftsStore: Unsubscriber;
@@ -80,7 +80,7 @@ export class StoreVaultSync {
   private async waitForSync(): Promise<void> {
     const settings = get(pluginSettings);
 
-    // First check if wait for sync is enabled in settings
+    // First check if "wait for sync" in setting or the Sync plugin itself is enabled
     if (!settings.waitForSync || !this.isSyncEnabled()) {
       return Promise.resolve();
     }
@@ -89,20 +89,16 @@ export class StoreVaultSync {
       // @ts-ignore - accessing private API
       const sync = this.app.internalPlugins.plugins.sync.instance;
 
-      // Check if we can access the sync status
-      if (!sync?.instance?.syncing) {
-        if (settings.fallbackWaitEnabled) {
-          console.log("[Longform] Waiting fallback time...");
-          return new Promise(resolve =>
-            setTimeout(resolve, settings.fallbackWaitTime * 1000)
-          );
-        }
-        return Promise.resolve();
+      // Set waitingForSync to disable watchers and enable loading spinner
+      waitingForSync.set(true);
+
+      // Check if we can't access the sync status (possibly due to Sync plugin API changes), use fallback wait if not
+      if (!sync?.syncing) {
+        return this.fallbackWait();
       }
 
-      waitingForSync.set(true);
       return new Promise((resolve) => {
-        if (!sync.syncStatus.isSyncing) {
+        if (!sync.syncing) {
           waitingForSync.set(false);
           resolve();
           return;
@@ -110,21 +106,22 @@ export class StoreVaultSync {
 
         console.log("[Longform] Waiting for active sync to complete...");
 
-        const handler = () => {
-          if (!sync.syncStatus?.isSyncing) {
-            sync.off('sync-status', handler);
-            console.log("[Longform] Sync complete, proceeding with initialization");
+        // Poll sync status every second
+        const interval = setInterval(() => {
+          if (!sync.syncing) {
+            clearInterval(interval);
+            clearTimeout(timeout);  // Clear the timeout when sync completes
+            console.log("[Longform] Sync complete.");
             waitingForSync.set(false);
             resolve();
           }
-        };
+          console.log("[Longform] Sync status:", sync.syncStatus);
+        }, 1000);
 
-        sync.on('sync-status', handler);
-
-        // Add a timeout just in case sync status never changes
-        setTimeout(() => {
-          sync.off('sync-status', handler);
-          console.log("[Longform] Sync wait timed out, proceeding with initialization");
+        // Add a timeout just in case sync never completes
+        const timeout = setTimeout(() => {
+          clearInterval(interval);
+          console.log("[Longform] Sync wait timed out");
           waitingForSync.set(false);
           resolve();
         }, this.settlingTime);
@@ -140,7 +137,10 @@ export class StoreVaultSync {
     if (!settings.fallbackWaitEnabled) {
       return Promise.resolve();
     }
-    return new Promise(resolve => setTimeout(resolve, settings.fallbackWaitTime * 1000));
+
+    return new Promise(resolve =>
+      setTimeout(resolve, settings.fallbackWaitTime * 1000)
+    );
   }
 
   async initialize() {

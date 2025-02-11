@@ -259,7 +259,7 @@ export class LongformSettingsTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Wait for Obsidian Sync")
-      .setDesc("Prevent Longform from running until Obsidian Sync completes its first sync. If you are using Obsidian Sync, you may want to enable this if you experience issues with scenes disappearing or being shown as new.")
+      .setDesc("Prevent Longform from running until Obsidian Sync completes its first sync. If you are using Sync, you may want to enable this if you experience issues with scenes disappearing or falsely being shown as new.")
       .addToggle((cb) => {
         cb.setValue(settings.waitForSync);
         cb.onChange((value) => {
@@ -275,7 +275,6 @@ export class LongformSettingsTab extends PluginSettingTab {
       .setDesc("If sync status cannot be detected, wait for the time specified below before looking for scenes.")
       .addToggle((cb) => {
         cb.setValue(settings.fallbackWaitEnabled);
-        cb.setDisabled(!settings.waitForSync);
         cb.onChange((value) => {
           pluginSettings.update((s) => ({
             ...s,
@@ -289,7 +288,6 @@ export class LongformSettingsTab extends PluginSettingTab {
       .setDesc("Time to wait in seconds if sync status cannot be detected.")
       .addText((cb) => {
         cb.setValue(settings.fallbackWaitTime.toString());
-        cb.setDisabled(!settings.waitForSync || !settings.fallbackWaitEnabled);
         cb.onChange((value) => {
           const numberValue = parseInt(value);
           if (!isNaN(numberValue) && numberValue > 0) {
